@@ -1,6 +1,4 @@
-import 'dart:io';
 import 'dart:isolate';
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'dart:developer' as dev_tools show log;
@@ -21,31 +19,34 @@ class Heroes {
         quirk = json["quirk"] as String;
 }
 
-/// This is the entrance of the below Isolate
-
-Future<Iterable> getHeroes() async {
-  /// a receivePort is used inside an entrance, its a tunnel which will await
-  /// the responses sent by it isolates main function. So ReceivePort has read/write access
-  /// But sendPort is write only
-  /// We know ReceivePort can also send Streams, but here we know it will send only one value
-
+/// this is the entrance of the isolate
+Stream<String> getMessage() {
   final rp = ReceivePort();
-  await Isolate.spawn(_getHeroes, rp.sendPort);
-  return await rp.first;
+  return Isolate.spawn(_getMessage, rp.sendPort)
+      .asStream()
+      .asyncExpand((_) => rp)
+
+      /// this will change the data type of the stream back to that of the Receive Port
+      .takeWhile((element) => element is String)
+
+      /// since we are sending nothing at Isolate.exit(sp) 's 2nd param so it sends "null", this code will help us remove it
+      .cast();
 }
 
-/// This is the main function of the Isolate
-void _getHeroes(SendPort sp) async {
-  const String url = "http://127.0.0.1:5500/apis/people.json";
-  final heroes = await HttpClient()
-      .getUrl(Uri.parse(url))
-      .then((req) => req.close())
-      .then((response) => response.transform(utf8.decoder).join())
-      .then((jsonString) => json.decode(jsonString) as List<dynamic>)
-      .then((json) => json.map((map) => Heroes.fromJson(map)));
+/// This is the main func or the main event loop
 
-  // sp.send(heroes); -> this wouldn't close the entrace to this isolate so use
-  Isolate.exit(sp, heroes);
+void _getMessage(SendPort sp) async {
+  /// take() is used to define the no of times we want this stream to send us data
+  await for (final now in Stream.periodic(
+          const Duration(seconds: 1), (_) => DateTime.now().toIso8601String())
+      .take(5)) {
+    sp.send(now);
+  }
+  Isolate.exit(sp);
+
+  /// [Note] : Here we have not send the 2nd parameter for the Iso late because we are sending our data via "sp.send()"
+  /// if we do send anything for e.g :  Isolate.exit(sp,"Hello"); , then it will append that "Hello", at the end of the
+  /// result sent by : sp.send(now)
 }
 
 void main() {
@@ -64,6 +65,12 @@ class MyApp extends StatelessWidget {
       ),
       home: const MyHomePage(title: 'Flutter Demo Home Page'),
     );
+  }
+}
+
+void testIt() async {
+  await for (final msg in getMessage()) {
+    msg.log();
   }
 }
 
@@ -94,11 +101,10 @@ class _MyHomePageState extends State<MyHomePage> {
         ),
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () async {
-          final heroes = await getHeroes();
-          heroes.log();
+        onPressed: () {
+          testIt();
         },
-        tooltip: 'Increment',
+        tooltip: 'Isolates with Stream',
         child: const Icon(Icons.add),
       ),
     );
