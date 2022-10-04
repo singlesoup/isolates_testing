@@ -1,5 +1,8 @@
 import 'dart:isolate';
+import 'dart:io';
+import 'dart:convert';
 
+import 'package:async/async.dart' show StreamGroup;
 import 'package:flutter/material.dart';
 import 'dart:developer' as dev_tools show log;
 
@@ -17,36 +20,65 @@ class Heroes {
   Heroes.fromJson(Map<String, dynamic> json)
       : name = json["name"] as String,
         quirk = json["quirk"] as String;
+
+  @override
+  String toString() => "Hero's (name: $name and quirk:$quirk";
 }
 
-/// this is the entrance of the isolate
-Stream<String> getMessage() {
-  final rp = ReceivePort();
-  return Isolate.spawn(_getMessage, rp.sendPort)
-      .asStream()
-      .asyncExpand((_) => rp)
+@immutable
+class Request {
+  final SendPort sendPort;
+  final Uri uri;
 
-      /// this will change the data type of the stream back to that of the Receive Port
-      .takeWhile((element) => element is String)
+  const Request(this.sendPort, this.uri);
 
-      /// since we are sending nothing at Isolate.exit(sp) 's 2nd param so it sends "null", this code will help us remove it
-      .cast();
+  Request.from(HeroesRequest request)
+      : sendPort = request.receivePort.sendPort,
+        uri = request.uri;
+}
+
+/// The whole point of creating this class was since that we can't send ReceivePort diretcly through SendPort
+/// we created a class which will make the conversion for us to send the Receive port
+@immutable
+class HeroesRequest {
+  final ReceivePort receivePort;
+  final Uri uri;
+  const HeroesRequest(this.receivePort, this.uri);
+
+  static Iterable<HeroesRequest> all() sync* {
+    for (final i in Iterable.generate(3, (i) => i)) {
+      yield HeroesRequest(
+        ReceivePort(),
+        Uri.parse("http://127.0.0.1:5500/apis/people${i + 1}.json"),
+      );
+    }
+  }
+}
+
+/// This is the entrance to the main()
+Stream<Iterable<Heroes>> getHeroes() {
+  final streams = HeroesRequest.all().map((req) =>
+      Isolate.spawn(_getHeroes, Request.from(req))
+          .asStream()
+          .asyncExpand((_) => req.receivePort)
+          .takeWhile((element) => element is Iterable<Heroes>)
+          .cast());
+
+  /// To merge all the responses we get from all the apis we will use stream group
+  return StreamGroup.merge(streams).cast();
 }
 
 /// This is the main func or the main event loop
+void _getHeroes(Request request) async {
+  final heroes = await HttpClient()
+      .getUrl(request.uri)
+      .then((req) => req.close())
+      .then((response) => response.transform(utf8.decoder).join())
+      .then((jsonString) => json.decode(jsonString) as List<dynamic>)
+      .then((json) => json.map((map) => Heroes.fromJson(map)));
 
-void _getMessage(SendPort sp) async {
-  /// take() is used to define the no of times we want this stream to send us data
-  await for (final now in Stream.periodic(
-          const Duration(seconds: 1), (_) => DateTime.now().toIso8601String())
-      .take(5)) {
-    sp.send(now);
-  }
-  Isolate.exit(sp);
-
-  /// [Note] : Here we have not send the 2nd parameter for the Iso late because we are sending our data via "sp.send()"
-  /// if we do send anything for e.g :  Isolate.exit(sp,"Hello"); , then it will append that "Hello", at the end of the
-  /// result sent by : sp.send(now)
+  // request.sendPort.send(heroes); or
+  Isolate.exit(request.sendPort, heroes);
 }
 
 void main() {
@@ -69,7 +101,7 @@ class MyApp extends StatelessWidget {
 }
 
 void testIt() async {
-  await for (final msg in getMessage()) {
+  await for (final msg in getHeroes()) {
     msg.log();
   }
 }
